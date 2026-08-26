@@ -38,7 +38,9 @@ import { createDocumentAuthOptions, createRecipientAuthOptions } from '../../uti
 import { buildTeamWhereQuery } from '../../utils/teams';
 import { incrementDocumentId, incrementTemplateId } from '../envelope/increment-id';
 import { assertOrganisationRatesAndLimits } from '../rate-limit/assert-organisation-rates-and-limits';
+import { assertCompatibleRecipientGrouping } from '../signature-level/assert-compatible-recipient-grouping';
 import { assertCompatibleRecipientRole } from '../signature-level/assert-compatible-recipient-role';
+import { assignDefaultRecipientSigningOrders } from '../signature-level/assign-default-recipient-signing-orders';
 import { resolveSignatureLevel } from '../signature-level/resolve-signature-level';
 import { getTeamSettings } from '../team/get-team-settings';
 import { assertUserNotDisabledById } from '../user/assert-user-not-disabled';
@@ -280,6 +282,32 @@ export const createEnvelope = async ({
     assertCompatibleRecipientRole({ signatureLevel, role: recipient.role });
   }
 
+  const parsedDefaultRecipients =
+    settings.defaultRecipients && !bypassDefaultRecipients
+      ? ZDefaultRecipientsSchema.parse(settings.defaultRecipients)
+      : [];
+
+  const defaultRecipients: CreateEnvelopeRecipientOptions[] = parsedDefaultRecipients.map((recipient) => ({
+    email: recipient.email,
+    name: recipient.name,
+    role: recipient.role,
+  }));
+
+  // Team default recipients carry no signing order, which on a TSP envelope
+  // would land them all in the shared tail step — a signing group — so they
+  // are numbered after the payload's highest order.
+  const orderedDefaultRecipients = assignDefaultRecipientSigningOrders({
+    signatureLevel,
+    payloadRecipients: data.recipients ?? [],
+    defaultRecipients,
+  });
+
+  const allRecipientsToCreate = [...(data.recipients || []), ...orderedDefaultRecipients];
+
+  // The grouping assertion runs against the COMBINED set the envelope will
+  // actually hold, not just the payload.
+  assertCompatibleRecipientGrouping({ signatureLevel, recipients: allRecipientsToCreate });
+
   const visibility = visibilityOverride || settings.documentVisibility;
 
   const emailId = meta?.emailId;
@@ -403,21 +431,8 @@ export const createEnvelope = async ({
 
     const firstEnvelopeItem = envelope.envelopeItems[0];
 
-    const defaultRecipients =
-      settings.defaultRecipients && !bypassDefaultRecipients
-        ? ZDefaultRecipientsSchema.parse(settings.defaultRecipients)
-        : [];
-
-    const mappedDefaultRecipients: CreateEnvelopeRecipientOptions[] = defaultRecipients.map((recipient) => ({
-      email: recipient.email,
-      name: recipient.name,
-      role: recipient.role,
-    }));
-
-    const allRecipients = [...(data.recipients || []), ...mappedDefaultRecipients];
-
     await Promise.all(
-      allRecipients.map(async (recipient) => {
+      allRecipientsToCreate.map(async (recipient) => {
         const recipientAuthOptions = createRecipientAuthOptions({
           accessAuth: recipient.accessAuth ?? [],
           actionAuth: recipient.actionAuth ?? [],

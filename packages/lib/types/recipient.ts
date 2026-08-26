@@ -125,3 +125,21 @@ export type TEnvelopeRecipientLite = z.infer<typeof ZEnvelopeRecipientLiteSchema
 export type TEnvelopeRecipientMany = z.infer<typeof ZEnvelopeRecipientManySchema>;
 
 export const ZRecipientEmailSchema = z.union([z.literal(''), zEmail('Invalid email').trim().toLowerCase().max(254)]);
+
+/**
+ * Signing order for a recipient, for use in request schemas.
+ *
+ * `Recipient.signingOrder` is an `Int` column and Prisma truncates rather than
+ * rejects a fraction, so an unconstrained `z.number()` silently rewrites the
+ * caller's value (1.5 becomes 1) — which, since equal orders mean "same signing
+ * step", can quietly merge recipients into one group. Orders are also 1-based
+ * everywhere they are generated, and assistant scoping uses `?? 0` as its
+ * floor, so zero and negatives are not meaningful.
+ *
+ * Response schemas intentionally do not use this: existing rows may hold values
+ * that predate the constraint, and reads must not fail because of it.
+ */
+export const ZRecipientSigningOrderSchema = z
+  .number()
+  .int('Signing order must be an integer')
+  .min(1, 'Signing order must be greater than 0');

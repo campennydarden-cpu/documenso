@@ -25,6 +25,7 @@ import { mapEnvelopeToWebhookDocumentPayload, ZWebhookDocumentSchema } from '../
 import { extractDocumentAuthMethods } from '../../utils/document-auth';
 import type { EnvelopeIdOptions } from '../../utils/envelope';
 import { mapSecondaryIdToDocumentId, unsafeBuildEnvelopeIdQuery } from '../../utils/envelope';
+import { filterRecipientsInFirstSigningGroup } from '../../utils/recipient-groups';
 import { assertRecipientNotExpired } from '../../utils/recipients';
 import { getIsRecipientsTurnToSign } from '../recipient/get-is-recipient-turn';
 import { triggerWebhook } from '../webhooks/trigger/trigger-webhook';
@@ -423,6 +424,7 @@ export const completeDocumentWithToken = async ({
     select: {
       id: true,
       signingOrder: true,
+      signingStatus: true,
       name: true,
       email: true,
       role: true,
@@ -451,65 +453,87 @@ export const completeDocumentWithToken = async ({
     });
 
     if (envelope.documentMeta?.signingOrder === DocumentSigningOrder.SEQUENTIAL) {
-      const [nextRecipient] = pendingRecipients;
+      // The next group: every pending recipient sharing the lowest pending
+      // signing order. If the completing recipient's own step is still
+      // pending (a group peer has not signed yet), the flow does not advance —
+      // the remaining peers were already activated when their step unlocked.
+      const nextGroup = filterRecipientsInFirstSigningGroup(pendingRecipients);
 
-      await prisma.$transaction(async (tx) => {
-        if (nextSigner && envelope.documentMeta?.allowDictateNextSigner) {
-          await tx.documentAuditLog.create({
-            data: createDocumentAuditLogData({
-              type: DOCUMENT_AUDIT_LOG_TYPE.RECIPIENT_UPDATED,
-              envelopeId: envelope.id,
-              user: {
-                name: recipientName,
-                email: recipientEmail,
-              },
-              requestMetadata,
+      const currentRecipientOrder = recipient.signingOrder ?? Number.MAX_SAFE_INTEGER;
+
+      const hasCompletedCurrentStep = nextGroup.every(
+        (pendingRecipient) => (pendingRecipient.signingOrder ?? Number.MAX_SAFE_INTEGER) > currentRecipientOrder,
+      );
+
+      if (nextGroup.length > 0 && hasCompletedCurrentStep) {
+        // Dictation only applies when advancing to a single-recipient step.
+        const canDictateNextSigner =
+          Boolean(nextSigner) && Boolean(envelope.documentMeta?.allowDictateNextSigner) && nextGroup.length === 1;
+
+        await prisma.$transaction(async (tx) => {
+          if (canDictateNextSigner && nextSigner) {
+            const [nextRecipient] = nextGroup;
+
+            await tx.documentAuditLog.create({
+              data: createDocumentAuditLogData({
+                type: DOCUMENT_AUDIT_LOG_TYPE.RECIPIENT_UPDATED,
+                envelopeId: envelope.id,
+                user: {
+                  name: recipientName,
+                  email: recipientEmail,
+                },
+                requestMetadata,
+                data: {
+                  recipientEmail: nextRecipient.email,
+                  recipientName: nextRecipient.name,
+                  recipientId: nextRecipient.id,
+                  recipientRole: nextRecipient.role,
+                  changes: [
+                    {
+                      type: RECIPIENT_DIFF_TYPE.NAME,
+                      from: nextRecipient.name,
+                      to: nextSigner.name,
+                    },
+                    {
+                      type: RECIPIENT_DIFF_TYPE.EMAIL,
+                      from: nextRecipient.email,
+                      to: nextSigner.email,
+                    },
+                  ],
+                },
+              }),
+            });
+          }
+
+          for (const nextRecipient of nextGroup) {
+            await tx.recipient.update({
+              where: { id: nextRecipient.id },
               data: {
-                recipientEmail: nextRecipient.email,
-                recipientName: nextRecipient.name,
-                recipientId: nextRecipient.id,
-                recipientRole: nextRecipient.role,
-                changes: [
-                  {
-                    type: RECIPIENT_DIFF_TYPE.NAME,
-                    from: nextRecipient.name,
-                    to: nextSigner.name,
-                  },
-                  {
-                    type: RECIPIENT_DIFF_TYPE.EMAIL,
-                    from: nextRecipient.email,
-                    to: nextSigner.email,
-                  },
-                ],
+                sendStatus: SendStatus.SENT,
+                sentAt: new Date(),
+                ...(canDictateNextSigner && nextSigner
+                  ? {
+                      name: nextSigner.name,
+                      email: nextSigner.email,
+                    }
+                  : {}),
               },
-            }),
+            });
+          }
+        });
+
+        for (const nextRecipient of nextGroup) {
+          await jobs.triggerJob({
+            name: 'send.signing.requested.email',
+            payload: {
+              userId: envelope.userId,
+              documentId: legacyDocumentId,
+              recipientId: nextRecipient.id,
+              requestMetadata,
+            },
           });
         }
-
-        await tx.recipient.update({
-          where: { id: nextRecipient.id },
-          data: {
-            sendStatus: SendStatus.SENT,
-            sentAt: new Date(),
-            ...(nextSigner && envelope.documentMeta?.allowDictateNextSigner
-              ? {
-                  name: nextSigner.name,
-                  email: nextSigner.email,
-                }
-              : {}),
-          },
-        });
-      });
-
-      await jobs.triggerJob({
-        name: 'send.signing.requested.email',
-        payload: {
-          userId: envelope.userId,
-          documentId: legacyDocumentId,
-          recipientId: nextRecipient.id,
-          requestMetadata,
-        },
-      });
+      }
     }
   }
 

@@ -39,7 +39,11 @@ export type DocumentSigningFormProps = {
   }) => Promise<void>;
   isSubmitting: boolean;
   fieldsValidated: () => void;
-  nextRecipient?: RecipientWithFields;
+  /**
+   * The dictatable next recipient, decided server-side. Only their identity
+   * is needed — for the dictation flag and the prefilled inputs.
+   */
+  nextRecipient?: Pick<Recipient, 'name' | 'email'>;
 };
 
 export const DocumentSigningForm = ({
@@ -83,6 +87,13 @@ export const DocumentSigningForm = ({
   const uninsertedRecipientFields = useMemo(() => {
     return fieldsRequiringValidation.filter((field) => field.recipientId === recipient.id);
   }, [fieldsRequiringValidation, recipient]);
+
+  // Single-sourced for every role branch: dictation is only offered when a
+  // dictatable next recipient exists — a branch missing the `nextRecipient`
+  // guard used to silently block viewers from completing.
+  const allowDictateNextSigner = Boolean(nextRecipient && document.documentMeta?.allowDictateNextSigner);
+
+  const defaultNextSigner = nextRecipient ? { name: nextRecipient.name, email: nextRecipient.email } : undefined;
 
   const localFieldsValidated = () => {
     setValidateUninsertedFields(true);
@@ -151,10 +162,8 @@ export const DocumentSigningForm = ({
                     completeDocument({ nextSigner, accessAuthOptions })
                   }
                   recipient={recipient}
-                  allowDictateNextSigner={document.documentMeta?.allowDictateNextSigner}
-                  defaultNextSigner={
-                    nextRecipient ? { name: nextRecipient.name, email: nextRecipient.email } : undefined
-                  }
+                  allowDictateNextSigner={allowDictateNextSigner}
+                  defaultNextSigner={defaultNextSigner}
                 />
               </div>
             </div>
@@ -223,8 +232,8 @@ export const DocumentSigningForm = ({
                 onClose={() => !isAssistantSubmitting && setIsConfirmationDialogOpen(false)}
                 onConfirm={handleAssistantConfirmDialogSubmit}
                 isSubmitting={isAssistantSubmitting}
-                allowDictateNextSigner={nextRecipient && document.documentMeta?.allowDictateNextSigner}
-                defaultNextSigner={nextRecipient ? { name: nextRecipient.name, email: nextRecipient.email } : undefined}
+                allowDictateNextSigner={allowDictateNextSigner}
+                defaultNextSigner={defaultNextSigner}
               />
             </form>
           ) : (
@@ -291,10 +300,8 @@ export const DocumentSigningForm = ({
                     })
                   }
                   recipient={recipient}
-                  allowDictateNextSigner={nextRecipient && document.documentMeta?.allowDictateNextSigner}
-                  defaultNextSigner={
-                    nextRecipient ? { name: nextRecipient.name, email: nextRecipient.email } : undefined
-                  }
+                  allowDictateNextSigner={allowDictateNextSigner}
+                  defaultNextSigner={defaultNextSigner}
                 />
               </div>
             </>

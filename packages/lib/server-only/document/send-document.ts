@@ -38,6 +38,7 @@ import { isDocumentCompleted } from '../../utils/document';
 import { extractDocumentAuthMethods } from '../../utils/document-auth';
 import { type EnvelopeIdOptions, mapSecondaryIdToDocumentId } from '../../utils/envelope';
 import { toCheckboxCustomText, toRadioCustomText } from '../../utils/fields';
+import { filterRecipientsInFirstSigningGroup, flattenRecipientGroups } from '../../utils/recipient-groups';
 import { getRecipientsWithMissingFields, isRecipientEmailValidForSending } from '../../utils/recipients';
 import { getEnvelopeWhereInput } from '../envelope/get-envelope-by-id';
 import { insertFormValuesInPdf } from '../pdf/insert-form-values-in-pdf';
@@ -147,13 +148,38 @@ export const sendDocument = async ({ id, userId, teamId, sendEmail, requestMetad
     envelope.documentMeta.signingOrder = DocumentSigningOrder.SEQUENTIAL;
   }
 
+  // Signing groups cannot exist on a TSP envelope: two recipients sharing a
+  // step sign in parallel, which breaks the per-recipient /ByteRange invariant.
+  // The schema-layer guard should have caught this at write time; flatten the
+  // groups here so an envelope that slipped through is still distributable.
+  if (isTspEnvelope(envelope)) {
+    const flattenedOrders = flattenRecipientGroups(envelope.recipients);
+
+    if (flattenedOrders.length > 0) {
+      console.warn(
+        `[CSC] Coercing ${flattenedOrders.length} grouped recipient(s) to distinct signing orders for ${envelope.signatureLevel} envelope ${envelope.id} at send time. The schema-layer guard should have caught this earlier.`,
+      );
+
+      await prisma.$transaction(
+        flattenedOrders.map(({ id, signingOrder: order }) =>
+          prisma.recipient.update({ where: { id }, data: { signingOrder: order } }),
+        ),
+      );
+
+      envelope.recipients = envelope.recipients.map((recipient) => {
+        const flattened = flattenedOrders.find((entry) => entry.id === recipient.id);
+
+        return flattened ? { ...recipient, signingOrder: flattened.signingOrder } : recipient;
+      });
+    }
+  }
+
   let recipientsToNotify = envelope.recipients;
 
   if (signingOrder === DocumentSigningOrder.SEQUENTIAL) {
-    // Get the currently active recipient.
-    recipientsToNotify = envelope.recipients
-      .filter((r) => r.signingStatus === SigningStatus.NOT_SIGNED && r.role !== RecipientRole.CC)
-      .slice(0, 1);
+    // Get the currently active signing group. Recipients sharing the lowest
+    // pending signing order act in parallel within their group.
+    recipientsToNotify = filterRecipientsInFirstSigningGroup(envelope.recipients);
   }
 
   if (envelope.envelopeItems.length === 0) {
