@@ -38,7 +38,7 @@ jobs:
         run: npm run prisma:migrate-dev
       - name: Run Playwright tests
         run: npm run ci
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: playwright-report
