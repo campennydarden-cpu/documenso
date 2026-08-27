@@ -31,7 +31,7 @@
     "posthog-js": "^1.77.3",
     "react": "18.2.0",
     "react-confetti": "^6.1.0",
-    "react-dom": "18.2.0",
+    "react-dom": "19.2.8",
     "react-hook-form": "^7.43.9",
     "react-icons": "^4.11.0",
     "recharts": "^2.7.2",
@@ -42,6 +42,6 @@
   "devDependencies": {
     "@types/node": "20.1.0",
     "@types/react": "18.2.18",
-    "@types/react-dom": "18.2.7"
+    "@types/react-dom": "19.2.5"
   }
 }
